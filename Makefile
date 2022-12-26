@@ -5,7 +5,7 @@ else
 endif
 DOCKER_USER ?= $(shell echo ${NAME} | cut -d / -f1)
 VERSION ?= dev
-RUNNER_VERSION ?= 2.296.1
+RUNNER_VERSION ?= 2.299.1
 TARGETPLATFORM ?= $(shell arch)
 RUNNER_NAME ?= ${DOCKER_USER}/actions-runner
 RUNNER_TAG  ?= ${VERSION}
@@ -19,6 +19,7 @@ KUBECONTEXT ?= kind-acceptance
 CLUSTER ?= acceptance
 CERT_MANAGER_VERSION ?= v1.1.1
 KUBE_RBAC_PROXY_VERSION ?= v0.11.0
+SHELLCHECK_VERSION ?= 0.8.0
 
 # Produce CRDs that work back to Kubernetes 1.11 (no version conversion)
 CRD_OPTIONS ?= "crd:generateEmbeddedObjectMeta=true"
@@ -31,6 +32,20 @@ GOBIN=$(shell go env GOBIN)
 endif
 
 TEST_ASSETS=$(PWD)/test-assets
+TOOLS_PATH=$(PWD)/.tools
+
+OS_NAME := $(shell uname -s | tr A-Z a-z)
+
+# The etcd packages that coreos maintain use different extensions for each *nix OS on their github release page.
+# ETCD_EXTENSION: the storage format file extension listed on the release page.
+# EXTRACT_COMMAND: the  appropriate CLI command for extracting this file format.
+ifeq ($(OS_NAME), darwin)
+ETCD_EXTENSION:=zip
+EXTRACT_COMMAND:=unzip
+else
+ETCD_EXTENSION:=tar.gz
+EXTRACT_COMMAND:=tar -xzf
+endif
 
 # default list of platforms for which multiarch image is built
 ifeq (${PLATFORMS}, )
@@ -51,10 +66,13 @@ endif
 
 all: manager
 
+lint:
+	docker run --rm -v $(PWD):/app -w /app golangci/golangci-lint:v1.49.0 golangci-lint run
+
 GO_TEST_ARGS ?= -short
 
 # Run tests
-test: generate fmt vet manifests
+test: generate fmt vet manifests shellcheck
 	go test $(GO_TEST_ARGS) ./... -coverprofile cover.out
 	go test -fuzz=Fuzz -fuzztime=10s -run=Fuzz* ./controllers
 
@@ -109,6 +127,10 @@ vet:
 # Generate code
 generate: controller-gen
 	$(CONTROLLER_GEN) object:headerFile=./hack/boilerplate.go.txt paths="./..."
+
+# Run shellcheck on runner scripts
+shellcheck: shellcheck-install
+	$(TOOLS_PATH)/shellcheck --shell bash --source-path runner runner/*.sh
 
 docker-buildx:
 	export DOCKER_CLI_EXPERIMENTAL=enabled ;\
@@ -194,8 +216,8 @@ acceptance/deploy:
 acceptance/tests:
 	acceptance/checks.sh
 
-acceptance/runner/entrypoint:
-	cd test/entrypoint/ && bash test.sh
+acceptance/runner/startup:
+	cd test/startup/ && bash test.sh
 
 # We use -count=1 instead of `go clean -testcache`
 # See https://terratest.gruntwork.io/docs/testing-best-practices/avoid-test-caching/
@@ -249,7 +271,24 @@ ifeq (, $(wildcard $(GOBIN)/yq))
 endif
 YQ=$(GOBIN)/yq
 
-OS_NAME := $(shell uname -s | tr A-Z a-z)
+# find or download shellcheck
+# download shellcheck if necessary
+shellcheck-install:
+ifeq (, $(wildcard $(TOOLS_PATH)/shellcheck))
+	echo "Downloading shellcheck"
+	@{ \
+	set -e ;\
+	SHELLCHECK_TMP_DIR=$$(mktemp -d) ;\
+	cd $$SHELLCHECK_TMP_DIR ;\
+	curl -LO https://github.com/koalaman/shellcheck/releases/download/v$(SHELLCHECK_VERSION)/shellcheck-v$(SHELLCHECK_VERSION).$(OS_NAME).x86_64.tar.xz ;\
+	tar Jxvf shellcheck-v$(SHELLCHECK_VERSION).$(OS_NAME).x86_64.tar.xz ;\
+	cd $(CURDIR) ;\
+	mkdir -p $(TOOLS_PATH) ;\
+	mv $$SHELLCHECK_TMP_DIR/shellcheck-v$(SHELLCHECK_VERSION)/shellcheck $(TOOLS_PATH)/ ;\
+	rm -rf $$SHELLCHECK_TMP_DIR ;\
+	}
+endif
+SHELLCHECK=$(TOOLS_PATH)/shellcheck
 
 # find or download etcd
 etcd:
@@ -259,12 +298,10 @@ ifeq (, $(wildcard $(TEST_ASSETS)/etcd))
 	set -xe ;\
 	INSTALL_TMP_DIR=$$(mktemp -d) ;\
 	cd $$INSTALL_TMP_DIR ;\
-	wget https://github.com/kubernetes-sigs/kubebuilder/releases/download/v2.3.2/kubebuilder_2.3.2_$(OS_NAME)_amd64.tar.gz ;\
+	wget https://github.com/coreos/etcd/releases/download/v3.4.22/etcd-v3.4.22-$(OS_NAME)-amd64.$(ETCD_EXTENSION);\
 	mkdir -p $(TEST_ASSETS) ;\
-	tar zxvf kubebuilder_2.3.2_$(OS_NAME)_amd64.tar.gz ;\
-	mv kubebuilder_2.3.2_$(OS_NAME)_amd64/bin/etcd $(TEST_ASSETS)/etcd ;\
-	mv kubebuilder_2.3.2_$(OS_NAME)_amd64/bin/kube-apiserver $(TEST_ASSETS)/kube-apiserver ;\
-	mv kubebuilder_2.3.2_$(OS_NAME)_amd64/bin/kubectl $(TEST_ASSETS)/kubectl ;\
+	$(EXTRACT_COMMAND) etcd-v3.4.22-$(OS_NAME)-amd64.$(ETCD_EXTENSION) ;\
+	mv etcd-v3.4.22-$(OS_NAME)-amd64/etcd $(TEST_ASSETS)/etcd ;\
 	rm -rf $$INSTALL_TMP_DIR ;\
 	}
 ETCD_BIN=$(TEST_ASSETS)/etcd
@@ -286,9 +323,7 @@ ifeq (, $(wildcard $(TEST_ASSETS)/kube-apiserver))
 	wget https://github.com/kubernetes-sigs/kubebuilder/releases/download/v2.3.2/kubebuilder_2.3.2_$(OS_NAME)_amd64.tar.gz ;\
 	mkdir -p $(TEST_ASSETS) ;\
 	tar zxvf kubebuilder_2.3.2_$(OS_NAME)_amd64.tar.gz ;\
-	mv kubebuilder_2.3.2_$(OS_NAME)_amd64/bin/etcd $(TEST_ASSETS)/etcd ;\
 	mv kubebuilder_2.3.2_$(OS_NAME)_amd64/bin/kube-apiserver $(TEST_ASSETS)/kube-apiserver ;\
-	mv kubebuilder_2.3.2_$(OS_NAME)_amd64/bin/kubectl $(TEST_ASSETS)/kubectl ;\
 	rm -rf $$INSTALL_TMP_DIR ;\
 	}
 KUBE_APISERVER_BIN=$(TEST_ASSETS)/kube-apiserver
@@ -310,8 +345,6 @@ ifeq (, $(wildcard $(TEST_ASSETS)/kubectl))
 	wget https://github.com/kubernetes-sigs/kubebuilder/releases/download/v2.3.2/kubebuilder_2.3.2_$(OS_NAME)_amd64.tar.gz ;\
 	mkdir -p $(TEST_ASSETS) ;\
 	tar zxvf kubebuilder_2.3.2_$(OS_NAME)_amd64.tar.gz ;\
-	mv kubebuilder_2.3.2_$(OS_NAME)_amd64/bin/etcd $(TEST_ASSETS)/etcd ;\
-	mv kubebuilder_2.3.2_$(OS_NAME)_amd64/bin/kube-apiserver $(TEST_ASSETS)/kube-apiserver ;\
 	mv kubebuilder_2.3.2_$(OS_NAME)_amd64/bin/kubectl $(TEST_ASSETS)/kubectl ;\
 	rm -rf $$INSTALL_TMP_DIR ;\
 	}

@@ -48,7 +48,7 @@ type savedClient struct {
 }
 
 type resourceReader interface {
-	Get(context.Context, types.NamespacedName, client.Object) error
+	Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error
 }
 
 type MultiGitHubClient struct {
@@ -151,14 +151,6 @@ func (c *MultiGitHubClient) DeinitForRunnerSet(rs *v1alpha1.RunnerSet) {
 	c.derefClient(rs.Namespace, secretName, refFromRunnerSet(rs))
 }
 
-func (c *MultiGitHubClient) deinitClientForRunnerReplicaSet(rs *v1alpha1.RunnerReplicaSet) {
-	c.derefClient(rs.Namespace, rs.Spec.Template.Spec.GitHubAPICredentialsFrom.SecretRef.Name, refFromRunnerReplicaSet(rs))
-}
-
-func (c *MultiGitHubClient) deinitClientForRunnerDeployment(rd *v1alpha1.RunnerDeployment) {
-	c.derefClient(rd.Namespace, rd.Spec.Template.Spec.GitHubAPICredentialsFrom.SecretRef.Name, refFromRunnerDeployment(rd))
-}
-
 func (c *MultiGitHubClient) DeinitForHRA(hra *v1alpha1.HorizontalRunnerAutoscaler) {
 	var secretName string
 	if hra.Spec.GitHubAPICredentialsFrom != nil {
@@ -198,9 +190,8 @@ func (c *MultiGitHubClient) initClientForSecret(secret *corev1.Secret, dependent
 			return nil, err
 		}
 
-		// Check if EnterpriseURL is set.
-		if conf.EnterpriseURL == "" {
-			// fallback to the controller-wide setting
+		// Fallback to the controller-wide setting if EnterpriseURL is not set and the original client is an enterprise client.
+		if conf.EnterpriseURL == "" && c.githubClient.IsEnterprise {
 			conf.EnterpriseURL = c.githubClient.GithubBaseURL
 		}
 
@@ -309,22 +300,6 @@ func secretDataToGitHubClientConfig(data map[string][]byte) (*github.Config, err
 	conf.AppPrivateKey = string(data["github_app_private_key"])
 
 	return &conf, nil
-}
-
-func refFromRunnerDeployment(rd *v1alpha1.RunnerDeployment) *runnerOwnerRef {
-	return &runnerOwnerRef{
-		kind: rd.Kind,
-		ns:   rd.Namespace,
-		name: rd.Name,
-	}
-}
-
-func refFromRunnerReplicaSet(rs *v1alpha1.RunnerReplicaSet) *runnerOwnerRef {
-	return &runnerOwnerRef{
-		kind: rs.Kind,
-		ns:   rs.Namespace,
-		name: rs.Name,
-	}
 }
 
 func refFromRunner(r *v1alpha1.Runner) *runnerOwnerRef {

@@ -160,9 +160,7 @@ func TestNewRunnerPod(t *testing.T) {
 						},
 					},
 					ImagePullPolicy: corev1.PullAlways,
-					SecurityContext: &corev1.SecurityContext{
-						Privileged: func() *bool { v := false; return &v }(),
-					},
+					SecurityContext: &corev1.SecurityContext{},
 				},
 				{
 					Name:  "docker",
@@ -189,6 +187,17 @@ func TestNewRunnerPod(t *testing.T) {
 					},
 					SecurityContext: &corev1.SecurityContext{
 						Privileged: func(b bool) *bool { return &b }(true),
+					},
+					Lifecycle: &corev1.Lifecycle{
+						PreStop: &corev1.LifecycleHandler{
+							Exec: &corev1.ExecAction{
+								Command: []string{
+									"/bin/sh",
+									"-c",
+									"timeout \"${RUNNER_GRACEFUL_STOP_TIMEOUT:-15}\" /bin/sh -c \"echo 'Prestop hook started'; while [ -f /runner/.runner ]; do sleep 1; done; echo 'Waiting for dockerd to start'; while ! pgrep -x dockerd; do sleep 1; done; echo 'Prestop hook stopped'\" >/proc/1/fd/1 2>&1",
+								},
+							},
+						},
 					},
 				},
 			},
@@ -355,9 +364,7 @@ func TestNewRunnerPod(t *testing.T) {
 						},
 					},
 					ImagePullPolicy: corev1.PullAlways,
-					SecurityContext: &corev1.SecurityContext{
-						Privileged: boolPtr(false),
-					},
+					SecurityContext: &corev1.SecurityContext{},
 				},
 			},
 			RestartPolicy: corev1.RestartPolicyNever,
@@ -679,9 +686,7 @@ func TestNewRunnerPodFromRunnerController(t *testing.T) {
 						},
 					},
 					ImagePullPolicy: corev1.PullAlways,
-					SecurityContext: &corev1.SecurityContext{
-						Privileged: func() *bool { v := false; return &v }(),
-					},
+					SecurityContext: &corev1.SecurityContext{},
 				},
 				{
 					Name:  "docker",
@@ -708,6 +713,17 @@ func TestNewRunnerPodFromRunnerController(t *testing.T) {
 					},
 					SecurityContext: &corev1.SecurityContext{
 						Privileged: func(b bool) *bool { return &b }(true),
+					},
+					Lifecycle: &corev1.Lifecycle{
+						PreStop: &corev1.LifecycleHandler{
+							Exec: &corev1.ExecAction{
+								Command: []string{
+									"/bin/sh",
+									"-c",
+									"timeout \"${RUNNER_GRACEFUL_STOP_TIMEOUT:-15}\" /bin/sh -c \"echo 'Prestop hook started'; while [ -f /runner/.runner ]; do sleep 1; done; echo 'Waiting for dockerd to start'; while ! pgrep -x dockerd; do sleep 1; done; echo 'Prestop hook stopped'\" >/proc/1/fd/1 2>&1",
+								},
+							},
+						},
 					},
 				},
 			},
@@ -908,9 +924,7 @@ func TestNewRunnerPodFromRunnerController(t *testing.T) {
 						},
 					},
 					ImagePullPolicy: corev1.PullAlways,
-					SecurityContext: &corev1.SecurityContext{
-						Privileged: boolPtr(false),
-					},
+					SecurityContext: &corev1.SecurityContext{},
 				},
 			},
 			RestartPolicy: corev1.RestartPolicyNever,

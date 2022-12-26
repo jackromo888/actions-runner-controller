@@ -19,17 +19,18 @@ package main
 import (
 	"flag"
 	"fmt"
-	"github.com/actions-runner-controller/actions-runner-controller/build"
 	"os"
 	"strings"
 	"time"
 
 	actionsv1alpha1 "github.com/actions-runner-controller/actions-runner-controller/api/v1alpha1"
+	"github.com/actions-runner-controller/actions-runner-controller/build"
 	"github.com/actions-runner-controller/actions-runner-controller/controllers"
 	"github.com/actions-runner-controller/actions-runner-controller/github"
 	"github.com/actions-runner-controller/actions-runner-controller/logging"
 	"github.com/kelseyhightower/envconfig"
 	"k8s.io/apimachinery/pkg/runtime"
+
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -43,7 +44,6 @@ const (
 
 var (
 	scheme = runtime.NewScheme()
-	log    = ctrl.Log.WithName("actions-runner-controller")
 )
 
 func init() {
@@ -84,6 +84,7 @@ func main() {
 		dockerRegistryMirror string
 		namespace            string
 		logLevel             string
+		logFormat            string
 
 		commonRunnerLabels commaSeparatedStringSlice
 	)
@@ -103,6 +104,7 @@ func main() {
 	flag.Var(&runnerImagePullSecrets, "runner-image-pull-secret", "The default image-pull secret name for self-hosted runner container.")
 	flag.StringVar(&dockerRegistryMirror, "docker-registry-mirror", "", "The default Docker Registry Mirror used by runners.")
 	flag.StringVar(&c.Token, "github-token", c.Token, "The personal access token of GitHub.")
+	flag.StringVar(&c.EnterpriseURL, "github-enterprise-url", c.EnterpriseURL, "Enterprise URL to be used for your GitHub API calls")
 	flag.Int64Var(&c.AppID, "github-app-id", c.AppID, "The application ID of GitHub App.")
 	flag.Int64Var(&c.AppInstallationID, "github-app-installation-id", c.AppInstallationID, "The installation ID of GitHub App.")
 	flag.StringVar(&c.AppPrivateKey, "github-app-private-key", c.AppPrivateKey, "The path of a private key file to authenticate as a GitHub App")
@@ -118,10 +120,16 @@ func main() {
 	flag.Var(&commonRunnerLabels, "common-runner-labels", "Runner labels in the K1=V1,K2=V2,... format that are inherited all the runners created by the controller. See https://github.com/actions-runner-controller/actions-runner-controller/issues/321 for more information")
 	flag.StringVar(&namespace, "watch-namespace", "", "The namespace to watch for custom resources. Set to empty for letting it watch for all namespaces.")
 	flag.StringVar(&logLevel, "log-level", logging.LogLevelDebug, `The verbosity of the logging. Valid values are "debug", "info", "warn", "error". Defaults to "debug".`)
+	flag.StringVar(&logFormat, "log-format", "text", `The log format. Valid options are "text" and "json". Defaults to "text"`)
+
 	flag.Parse()
 
-	logger := logging.NewLogger(logLevel)
-	c.Log = &logger
+	log, err := logging.NewLogger(logLevel, logFormat)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: creating logger: %v\n", err)
+		os.Exit(1)
+	}
+	c.Log = &log
 
 	ghClient, err = c.NewClient()
 	if err != nil {
@@ -129,7 +137,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	ctrl.SetLogger(logger)
+	ctrl.SetLogger(log)
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:             scheme,

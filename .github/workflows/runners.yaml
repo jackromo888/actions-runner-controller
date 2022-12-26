@@ -25,9 +25,9 @@ on:
       - '!**.md'
 
 env:
-  RUNNER_VERSION: 2.296.1
-  DOCKER_VERSION: 20.10.12
-  RUNNER_CONTAINER_HOOKS_VERSION: 0.1.2
+  RUNNER_VERSION: 2.299.1
+  DOCKER_VERSION: 20.10.21
+  RUNNER_CONTAINER_HOOKS_VERSION: 0.1.3
   DOCKERHUB_USERNAME: summerwind
 
 jobs:
@@ -44,19 +44,33 @@ jobs:
           - name: actions-runner
             os-name: ubuntu
             os-version: 20.04
+            latest: "true"
+          - name: actions-runner
+            os-name: ubuntu
+            os-version: 22.04
+            latest: "false"
           - name: actions-runner-dind
             os-name: ubuntu
             os-version: 20.04
+            latest: "true"
+          - name: actions-runner-dind
+            os-name: ubuntu
+            os-version: 22.04
+            latest: "false"
           - name: actions-runner-dind-rootless
             os-name: ubuntu
             os-version: 20.04
+            latest: "true"
+          - name: actions-runner-dind-rootless
+            os-name: ubuntu
+            os-version: 22.04
+            latest: "false"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v3
 
       - name: Setup Docker Environment
-        id: vars
         uses: ./.github/actions/setup-docker-environment
         with:
           username: ${{ env.DOCKERHUB_USERNAME }}
@@ -68,7 +82,7 @@ jobs:
         uses: docker/build-push-action@v3
         with:
           context: ./runner
-          file: ./runner/${{ matrix.name }}.dockerfile
+          file: ./runner/${{ matrix.name }}.${{ matrix.os-name }}-${{ matrix.os-version }}.dockerfile
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
           build-args: |
@@ -77,10 +91,31 @@ jobs:
             RUNNER_CONTAINER_HOOKS_VERSION=${{ env.RUNNER_CONTAINER_HOOKS_VERSION }}
           tags: |
             ${{ env.DOCKERHUB_USERNAME }}/${{ matrix.name }}:v${{ env.RUNNER_VERSION }}-${{ matrix.os-name }}-${{ matrix.os-version }}
-            ${{ env.DOCKERHUB_USERNAME }}/${{ matrix.name }}:v${{ env.RUNNER_VERSION }}-${{ matrix.os-name }}-${{ matrix.os-version }}-${{ steps.vars.outputs.sha_short }}
+            ${{ env.DOCKERHUB_USERNAME }}/${{ matrix.name }}:v${{ env.RUNNER_VERSION }}-${{ matrix.os-name }}-${{ matrix.os-version }}-${{ env.sha_short }}
+            ${{ env.DOCKERHUB_USERNAME }}/${{ matrix.name }}:${{ matrix.os-name }}-${{ matrix.os-version }}
+            ghcr.io/${{ github.repository }}/${{ matrix.name }}:v${{ env.RUNNER_VERSION }}-${{ matrix.os-name }}-${{ matrix.os-version }}
+            ghcr.io/${{ github.repository }}/${{ matrix.name }}:v${{ env.RUNNER_VERSION }}-${{ matrix.os-name }}-${{ matrix.os-version }}-${{ env.sha_short }}
+            ghcr.io/${{ github.repository }}/${{ matrix.name }}:${{ matrix.os-name }}-${{ matrix.os-version }}
+          cache-from: type=gha,scope=build-${{ matrix.name }}-${{ matrix.os-name }}-${{ matrix.os-version }}
+          cache-to: type=gha,mode=max,scope=build-${{ matrix.name }}-${{ matrix.os-name }}-${{ matrix.os-version }}
+
+      # NOTE : Only to be used on the 20.04 image until we remove the latest tag entirely
+      # at which point this step needs to be deleted
+      # https://github.com/actions-runner-controller/actions-runner-controller/issues/2056
+      - name: Build and Push Latest Tags
+        if: ${{ matrix.latest == 'true' }}
+        uses: docker/build-push-action@v3
+        with:
+          context: ./runner
+          file: ./runner/${{ matrix.name }}.${{ matrix.os-name }}-${{ matrix.os-version }}.dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+          build-args: |
+            RUNNER_VERSION=${{ env.RUNNER_VERSION }}
+            DOCKER_VERSION=${{ env.DOCKER_VERSION }}
+            RUNNER_CONTAINER_HOOKS_VERSION=${{ env.RUNNER_CONTAINER_HOOKS_VERSION }}
+          tags: |
             ${{ env.DOCKERHUB_USERNAME }}/${{ matrix.name }}:latest
             ghcr.io/${{ github.repository }}/${{ matrix.name }}:latest
-            ghcr.io/${{ github.repository }}/${{ matrix.name }}:v${{ env.RUNNER_VERSION }}-${{ matrix.os-name }}-${{ matrix.os-version }}
-            ghcr.io/${{ github.repository }}/${{ matrix.name }}:v${{ env.RUNNER_VERSION }}-${{ matrix.os-name }}-${{ matrix.os-version }}-${{ steps.vars.outputs.sha_short }}
-          cache-from: type=gha,scope=build-${{ matrix.name }}
-          cache-to: type=gha,mode=max,scope=build-${{ matrix.name }}
+          cache-from: type=gha,scope=build-${{ matrix.name }}-${{ matrix.os-name }}-${{ matrix.os-version }}
+          cache-to: type=gha,mode=max,scope=build-${{ matrix.name }}-${{ matrix.os-name }}-${{ matrix.os-version }}

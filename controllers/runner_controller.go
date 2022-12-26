@@ -207,8 +207,34 @@ func runnerPodOrContainerIsStopped(pod *corev1.Pod) bool {
 
 				if status.State.Terminated != nil {
 					stopped = true
+					break
 				}
 			}
+		}
+
+		if pod.DeletionTimestamp != nil && !pod.DeletionTimestamp.IsZero() && len(pod.Status.ContainerStatuses) == 0 {
+			// This falls into cases where the pod is stuck with pod status like the below:
+			//
+			//   status:
+			//     conditions:
+			//     - lastProbeTime: null
+			//       lastTransitionTime: "2022-11-20T07:58:05Z"
+			//       message: 'binding rejected: running Bind plugin "DefaultBinder": Operation cannot
+			//         be fulfilled on pods/binding "org-runnerdeploy-l579v-qx5p2": pod org-runnerdeploy-l579v-qx5p2
+			//         is being deleted, cannot be assigned to a host'
+			//       reason: SchedulerError
+			//       status: "False"
+			//       type: PodScheduled
+			//     phase: Pending
+			//     qosClass: BestEffort
+			//
+			// ARC usually waits for the registration timeout to elapse when the pod is terminated before getting scheduled onto a node,
+			// assuming there can be a race condition between ARC and Kubernetes where Kubernetes schedules the pod while ARC is deleting the pod,
+			// which may end up with non-gracefully terminating the runner.
+			//
+			// However, Kubernetes seems to not schedule the pod after observing status like the above.
+			// This if-block is therefore needed to prevent ARC from unnecessarily waiting for the registration timeout to happen.
+			stopped = true
 		}
 	}
 
@@ -650,6 +676,10 @@ func (r *RunnerReconciler) newPod(runner v1alpha1.Runner) (corev1.Pod, error) {
 		pod.Spec.HostAliases = runnerSpec.HostAliases
 	}
 
+	if runnerSpec.DnsPolicy != "" {
+		pod.Spec.DNSPolicy = runnerSpec.DnsPolicy
+	}
+
 	if runnerSpec.DnsConfig != nil {
 		pod.Spec.DNSConfig = runnerSpec.DnsConfig
 	}
@@ -715,7 +745,7 @@ func runnerHookEnvs(pod *corev1.Pod) ([]corev1.EnvVar, error) {
 				},
 			},
 		},
-		corev1.EnvVar{
+		{
 			Name:  "ACTIONS_RUNNER_REQUIRE_SAME_NODE",
 			Value: strconv.FormatBool(isRequireSameNode),
 		},
@@ -834,7 +864,7 @@ func newRunnerPodWithContainerMode(containerMode string, template corev1.Pod, ru
 		if dockerdContainer != nil {
 			template.Spec.Containers = append(template.Spec.Containers[:dockerdContainerIndex], template.Spec.Containers[dockerdContainerIndex+1:]...)
 		}
-		if runnerContainerIndex < runnerContainerIndex {
+		if dockerdContainerIndex < runnerContainerIndex {
 			runnerContainerIndex--
 		}
 		dockerdContainer = nil
@@ -845,10 +875,6 @@ func newRunnerPodWithContainerMode(containerMode string, template corev1.Pod, ru
 		runnerContainerIndex = -1
 		runnerContainer = &corev1.Container{
 			Name: containerName,
-			SecurityContext: &corev1.SecurityContext{
-				// Runner need to run privileged if it contains DinD
-				Privileged: &dockerdInRunnerPrivileged,
-			},
 		}
 	}
 
@@ -883,8 +909,10 @@ func newRunnerPodWithContainerMode(containerMode string, template corev1.Pod, ru
 		runnerContainer.SecurityContext = &corev1.SecurityContext{}
 	}
 
-	if runnerContainer.SecurityContext.Privileged == nil {
-		// Runner need to run privileged if it contains DinD
+	// Runner need to run privileged if it contains DinD.
+	// Do not explicitly set SecurityContext.Privileged to false which is default,
+	// otherwise Windows pods don't get admitted on GKE.
+	if dockerdInRunnerPrivileged {
 		runnerContainer.SecurityContext.Privileged = &dockerdInRunnerPrivileged
 	}
 
@@ -1068,6 +1096,74 @@ func newRunnerPodWithContainerMode(containerMode string, template corev1.Pod, ru
 				},
 			}...)
 
+			// This let dockerd to create container's network interface to have the specified MTU.
+			// In other words, this is for setting com.docker.network.driver.mtu in the docker bridge options.
+			// You can see the options by running `docker network inspect bridge`, where you will see something like the below when spec.dockerMTU=1400:
+			//
+			// "Options": {
+			// 	 "com.docker.network.bridge.default_bridge": "true",
+			// 	 "com.docker.network.bridge.enable_icc": "true",
+			// 	 "com.docker.network.bridge.enable_ip_masquerade": "true",
+			// 	 "com.docker.network.bridge.host_binding_ipv4": "0.0.0.0",
+			// 	 "com.docker.network.bridge.name": "docker0",
+			// 	 "com.docker.network.driver.mtu": "1400"
+			// },
+			//
+			// See e.g. https://forums.docker.com/t/changing-mtu-value/74114 and https://mlohr.com/docker-mtu/ for more details.
+			//
+			// Note though, this doesn't immediately affect docker0's MTU, and the MTU of the docker network created with docker-create-network:
+			// You can verity that by running `ip link` within the containers:
+			//
+			//   # ip link
+			//   1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN qlen 1000
+			//   link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+			//   2: eth0@if1118: <BROADCAST,MULTICAST,UP,LOWER_UP,M-DOWN> mtu 1500 qdisc noqueue state UP
+			//   link/ether c2:dd:e6:66:8e:8b brd ff:ff:ff:ff:ff:ff
+			//   3: docker0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN
+			//   link/ether 02:42:ab:1c:83:69 brd ff:ff:ff:ff:ff:ff
+			//   4: br-c5bf6c172bd7: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN
+			//   link/ether 02:42:e2:91:13:1e brd ff:ff:ff:ff:ff:ff
+			//
+			// br-c5bf6c172bd7 is the interface that corresponds to the docker network created with docker-create-network.
+			// We have another ARC feature to inherit the host's MTU to the docker networks:
+			// https://github.com/actions-runner-controller/actions-runner-controller/pull/1201
+			//
+			// docker's MTU is updated to the specified MTU once any container is created.
+			// You can verity that by running a random container from within the runner or dockerd containers:
+			//
+			// / # docker run -d busybox sh -c 'sleep 10'
+			// e848e6acd6404ca0199e4d9c5ef485d88c974ddfb7aaf2359c66811f68cf5e42
+			//
+			// You'll now see the veth767f1a5@if7 got created with the MTU inherited by dockerd:
+			//
+			// / # ip link
+			// 1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN qlen 1000
+			//     link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+			// 2: eth0@if1118: <BROADCAST,MULTICAST,UP,LOWER_UP,M-DOWN> mtu 1500 qdisc noqueue state UP
+			//     link/ether c2:dd:e6:66:8e:8b brd ff:ff:ff:ff:ff:ff
+			// 3: docker0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1400 qdisc noqueue state UP
+			//     link/ether 02:42:ab:1c:83:69 brd ff:ff:ff:ff:ff:ff
+			// 4: br-c5bf6c172bd7: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN
+			//     link/ether 02:42:e2:91:13:1e brd ff:ff:ff:ff:ff:ff
+			// 8: veth767f1a5@if7: <BROADCAST,MULTICAST,UP,LOWER_UP,M-DOWN> mtu 1400 qdisc noqueue master docker0 state UP
+			//     link/ether 82:d5:08:28:d8:98 brd ff:ff:ff:ff:ff:ff
+			//
+			// # After 10 seconds sleep, you can see the container stops and the veth767f1a5@if7 interface got deleted:
+			//
+			// / # ip link
+			// 1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN qlen 1000
+			//     link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+			// 2: eth0@if1118: <BROADCAST,MULTICAST,UP,LOWER_UP,M-DOWN> mtu 1500 qdisc noqueue state UP
+			//     link/ether c2:dd:e6:66:8e:8b brd ff:ff:ff:ff:ff:ff
+			// 3: docker0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN
+			//     link/ether 02:42:ab:1c:83:69 brd ff:ff:ff:ff:ff:ff
+			// 4: br-c5bf6c172bd7: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN
+			//     link/ether 02:42:e2:91:13:1e brd ff:ff:ff:ff:ff:ff
+			//
+			// See https://github.com/moby/moby/issues/26382#issuecomment-246906331 for reference.
+			//
+			// Probably we'd better infer DockerMTU from the host's primary interface's MTU and docker0's MTU?
+			// That's another story- if you want it, please start a thread in GitHub Discussions!
 			dockerdContainer.Args = append(dockerdContainer.Args,
 				"--mtu",
 				fmt.Sprintf("%d", *runnerSpec.DockerMTU),
@@ -1078,6 +1174,27 @@ func newRunnerPodWithContainerMode(containerMode string, template corev1.Pod, ru
 			dockerdContainer.Args = append(dockerdContainer.Args,
 				fmt.Sprintf("--registry-mirror=%s", dockerRegistryMirror),
 			)
+		}
+
+		dockerdContainer.Lifecycle = &corev1.Lifecycle{
+			PreStop: &corev1.LifecycleHandler{
+				Exec: &corev1.ExecAction{
+					Command: []string{
+						"/bin/sh", "-c",
+						// A prestop hook can start before the dockerd start up, for example, when the docker init is still provisioning
+						// the TLS key and  the cert to be used by dockerd.
+						//
+						// The author of this prestop script encountered issues where the prestophung for ten or more minutes on his cluster.
+						// He realized that the hang happened when a prestop hook is executed while the docker init is provioning the key and cert.
+						// Assuming it's due to that the SIGTERM sent by K8s after the prestop hook was ignored by the docker init at that time,
+						// and it needed to wait until terminationGracePeriodSeconds to elapse before finally killing the container,
+						// he wrote this script so that it tries to delay SIGTERM until dockerd starts and becomes ready for processing the signal.
+						//
+						// Also note that we don't need to run `pkill dockerd` at the end of the prehook script, as SIGTERM is sent by K8s after the prestop had completed.
+						`timeout "${RUNNER_GRACEFUL_STOP_TIMEOUT:-15}" /bin/sh -c "echo 'Prestop hook started'; while [ -f /runner/.runner ]; do sleep 1; done; echo 'Waiting for dockerd to start'; while ! pgrep -x dockerd; do sleep 1; done; echo 'Prestop hook stopped'" >/proc/1/fd/1 2>&1`,
+					},
+				},
+			},
 		}
 	}
 
@@ -1225,14 +1342,4 @@ func isRequireSameNode(pod *corev1.Pod) (bool, error) {
 		}
 	}
 	return false, nil
-}
-
-func overwriteRunnerEnv(runner *v1alpha1.Runner, key string, value string) {
-	for i := range runner.Spec.Env {
-		if runner.Spec.Env[i].Name == key {
-			runner.Spec.Env[i].Value = value
-			return
-		}
-	}
-	runner.Spec.Env = append(runner.Spec.Env, corev1.EnvVar{Name: key, Value: value})
 }

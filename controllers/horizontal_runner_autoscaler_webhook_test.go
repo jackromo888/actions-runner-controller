@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -29,78 +28,6 @@ var (
 func init() {
 	_ = clientgoscheme.AddToScheme(sc)
 	_ = actionsv1alpha1.AddToScheme(sc)
-}
-
-func TestOrgWebhookCheckRun(t *testing.T) {
-	f, err := os.Open("testdata/org_webhook_check_run_payload.json")
-	if err != nil {
-		t.Fatalf("could not open the fixture: %s", err)
-	}
-	defer f.Close()
-	var e github.CheckRunEvent
-	if err := json.NewDecoder(f).Decode(&e); err != nil {
-		t.Fatalf("invalid json: %s", err)
-	}
-	testServer(t,
-		"check_run",
-		&e,
-		200,
-		"no horizontalrunnerautoscaler to scale for this github event",
-	)
-}
-
-func TestRepoWebhookCheckRun(t *testing.T) {
-	f, err := os.Open("testdata/repo_webhook_check_run_payload.json")
-	if err != nil {
-		t.Fatalf("could not open the fixture: %s", err)
-	}
-	defer f.Close()
-	var e github.CheckRunEvent
-	if err := json.NewDecoder(f).Decode(&e); err != nil {
-		t.Fatalf("invalid json: %s", err)
-	}
-	testServer(t,
-		"check_run",
-		&e,
-		200,
-		"no horizontalrunnerautoscaler to scale for this github event",
-	)
-}
-
-func TestWebhookPullRequest(t *testing.T) {
-	testServer(t,
-		"pull_request",
-		&github.PullRequestEvent{
-			PullRequest: &github.PullRequest{
-				Base: &github.PullRequestBranch{
-					Ref: github.String("main"),
-				},
-			},
-			Repo: &github.Repository{
-				Name: github.String("myorg/myrepo"),
-				Organization: &github.Organization{
-					Name: github.String("myorg"),
-				},
-			},
-			Action: github.String("created"),
-		},
-		200,
-		"no horizontalrunnerautoscaler to scale for this github event",
-	)
-}
-
-func TestWebhookPush(t *testing.T) {
-	testServer(t,
-		"push",
-		&github.PushEvent{
-			Repo: &github.PushEventRepository{
-				Name:         github.String("myrepo"),
-				Organization: github.String("myorg"),
-			},
-		},
-		200,
-		"no horizontalrunnerautoscaler to scale for this github event",
-	)
 }
 
 func TestWebhookPing(t *testing.T) {
@@ -504,7 +431,7 @@ func testServerWithInitObjs(t *testing.T, eventType string, event interface{}, w
 
 	hraWebhook := &HorizontalRunnerAutoscalerGitHubWebhook{}
 
-	client := fake.NewFakeClientWithScheme(sc, initObjs...)
+	client := fake.NewClientBuilder().WithScheme(sc).WithRuntimeObjects(initObjs...).Build()
 
 	logs := installTestLogger(hraWebhook)
 
@@ -537,7 +464,7 @@ func testServerWithInitObjs(t *testing.T, eventType string, event interface{}, w
 		t.Error("status:", resp.StatusCode)
 	}
 
-	respBody, err := ioutil.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -575,7 +502,7 @@ func sendWebhook(server *httptest.Server, eventType string, event interface{}) (
 			"X-GitHub-Event": {eventType},
 			"Content-Type":   {"application/json"},
 		},
-		Body: ioutil.NopCloser(bytes.NewBuffer(reqBody)),
+		Body: io.NopCloser(bytes.NewBuffer(reqBody)),
 	}
 
 	return http.DefaultClient.Do(req)
@@ -607,7 +534,7 @@ func (l *testLogSink) Info(_ int, msg string, kvs ...interface{}) {
 	fmt.Fprintf(l.writer, "\n")
 }
 
-func (_ *testLogSink) Enabled(level int) bool {
+func (*testLogSink) Enabled(level int) bool {
 	return true
 }
 

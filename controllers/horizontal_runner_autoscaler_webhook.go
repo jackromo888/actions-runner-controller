@@ -20,7 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -75,10 +75,8 @@ type HorizontalRunnerAutoscalerGitHubWebhook struct {
 	// A scale target is enqueued on each retrieval of each eligible webhook event, so that it is processed asynchronously.
 	QueueLimit int
 
-	worker      *worker
-	workerInit  sync.Once
-	workerStart sync.Once
-	batchCh     chan *ScaleTarget
+	worker     *worker
+	workerInit sync.Once
 }
 
 func (autoscaler *HorizontalRunnerAutoscalerGitHubWebhook) Reconcile(_ context.Context, request reconcile.Request) (reconcile.Result, error) {
@@ -133,7 +131,7 @@ func (autoscaler *HorizontalRunnerAutoscalerGitHubWebhook) Handle(w http.Respons
 			return
 		}
 	} else {
-		payload, err = ioutil.ReadAll(r.Body)
+		payload, err = io.ReadAll(r.Body)
 		if err != nil {
 			autoscaler.Log.Error(err, "error reading request body")
 
@@ -177,56 +175,6 @@ func (autoscaler *HorizontalRunnerAutoscalerGitHubWebhook) Handle(w http.Respons
 	enterpriseSlug := enterpriseEvent.Enterprise.Slug
 
 	switch e := event.(type) {
-	case *gogithub.PushEvent:
-		target, err = autoscaler.getScaleUpTarget(
-			context.TODO(),
-			log,
-			e.Repo.GetName(),
-			e.Repo.Owner.GetLogin(),
-			e.Repo.Owner.GetType(),
-			// Most go-github Event types don't seem to contain Enteprirse(.Slug) fields
-			// we need, so we parse it by ourselves.
-			enterpriseSlug,
-			autoscaler.MatchPushEvent(e),
-		)
-	case *gogithub.PullRequestEvent:
-		target, err = autoscaler.getScaleUpTarget(
-			context.TODO(),
-			log,
-			e.Repo.GetName(),
-			e.Repo.Owner.GetLogin(),
-			e.Repo.Owner.GetType(),
-			// Most go-github Event types don't seem to contain Enteprirse(.Slug) fields
-			// we need, so we parse it by ourselves.
-			enterpriseSlug,
-			autoscaler.MatchPullRequestEvent(e),
-		)
-
-		if pullRequest := e.PullRequest; pullRequest != nil {
-			log = log.WithValues(
-				"pullRequest.base.ref", e.PullRequest.Base.GetRef(),
-				"action", e.GetAction(),
-			)
-		}
-	case *gogithub.CheckRunEvent:
-		target, err = autoscaler.getScaleUpTarget(
-			context.TODO(),
-			log,
-			e.Repo.GetName(),
-			e.Repo.Owner.GetLogin(),
-			e.Repo.Owner.GetType(),
-			// Most go-github Event types don't seem to contain Enteprirse(.Slug) fields
-			// we need, so we parse it by ourselves.
-			enterpriseSlug,
-			autoscaler.MatchCheckRunEvent(e),
-		)
-
-		if checkRun := e.GetCheckRun(); checkRun != nil {
-			log = log.WithValues(
-				"checkRun.status", checkRun.GetStatus(),
-				"action", e.GetAction(),
-			)
-		}
 	case *gogithub.WorkflowJobEvent:
 		if workflowJob := e.GetWorkflowJob(); workflowJob != nil {
 			log = log.WithValues(
@@ -237,6 +185,8 @@ func (autoscaler *HorizontalRunnerAutoscalerGitHubWebhook) Handle(w http.Respons
 				"repository.owner.type", e.Repo.Owner.GetType(),
 				"enterprise.slug", enterpriseSlug,
 				"action", e.GetAction(),
+				"workflowJob.runID", e.WorkflowJob.GetRunID(),
+				"workflowJob.ID", e.WorkflowJob.GetID(),
 			)
 		}
 
@@ -307,7 +257,7 @@ func (autoscaler *HorizontalRunnerAutoscalerGitHubWebhook) Handle(w http.Respons
 
 	if target == nil {
 		log.V(1).Info(
-			"Scale target not found. If this is unexpected, ensure that there is exactly one repository-wide or organizational runner deployment that matches this webhook event",
+			"Scale target not found. If this is unexpected, ensure that there is exactly one repository-wide or organizational runner deployment that matches this webhook event. If --watch-namespace is set ensure this is configured correctly.",
 		)
 
 		msg := "no horizontalrunnerautoscaler to scale for this github event"
@@ -345,7 +295,7 @@ func (autoscaler *HorizontalRunnerAutoscalerGitHubWebhook) Handle(w http.Respons
 
 	msg := fmt.Sprintf("scaled %s by %d", target.Name, target.Amount)
 
-	autoscaler.Log.Info(msg)
+	log.Info(msg)
 
 	if written, err := w.Write([]byte(msg)); err != nil {
 		log.Error(err, "failed writing http response", "msg", msg, "written", written)
